@@ -424,12 +424,19 @@ WipeButton() {
         return
     if !CFG.btn  ; 설정에서 끄면 버튼을 띄우지 않는다 (캡처와 자동 저장은 그대로)
         return WIPE_BTN.Hide()
+    static last := -1, same := 0
     if ResultScreen() {
-        if !DllCall("IsWindowVisible", "ptr", WIPE_BTN.Hwnd)
-            WipeBtnShow()
         WIPE.seen := true
+        if DllCall("IsWindowVisible", "ptr", WIPE_BTN.Hwnd)
+            return
+        ; 버튼 줄이 다 나타날 때까지 기다린다: 가장 왼쪽 끝이 0.1초 간격으로 세 번 같으면 그 왼쪽에 띄운다
+        left := WipeBtnLeft()
+        same := Abs(left - last) < 0.005 ? same + 1 : 0, last := left
+        if same >= 2
+            WipeBtnShow(left)
         return
     }
+    last := -1, same := 0
     WIPE_BTN.Hide()
     if WIPE.seen && WV.gui && WV.overlay  ; "한 번 더"·"완료"로 결과 화면을 벗어나면 게임 위에 띄운 확인 창도 닫는다
         WipeViewClose()
@@ -437,12 +444,37 @@ WipeButton() {
         WIPE.ready := false
 }
 
-; "한 번 더" 버튼 왼쪽에 같은 크기·같은 줄로 그린다 (2000x1125 결과 화면 캡처에서 잰 값: 한 번 더 0.6355~0.7945w, 0.9271~0.9787h, 버튼 간격 0.0115w)
-WipeBtnShow() {
+; 결과 화면 아래 줄에서 게임이 그린 것(버튼, "한 번 더" 왼쪽에 붙는 배터리 칸 등) 중 가장 왼쪽 끝을 창 폭 비율로 돌려준다.
+; 결과마다 왼쪽에 붙는 것이 달라서 매번 잰다. 바탕은 검정(밝기 0), 버튼은 테두리·글자가 밝고 속은 위아래로 밝기가 달라서
+; 버튼 높이(0.932~0.977h)를 세로로 훑은 최댓값이 20을 넘으면 무언가 있는 칸으로 본다.
+; "완료" 버튼 안(0.88w)에서 왼쪽으로 따라가다 빈 칸이 0.03w보다 길게 이어지면(버튼 간격은 0.0115w) 멈춘다
+WipeBtnLeft() {
+    try WinGetClientPos(&gx, &gy, &w, &h, GAME)
+    catch
+        return 0.6355
+    rows := Round(h * 0.045), buf := GrabLum(gx, gy + Round(h * 0.932), w, rows), left := 0.88, dark := 0, x := 0.88
+    while (x -= 0.002) > 0.02 {
+        m := 0, col := Floor(w * x)
+        loop rows // 2 {
+            c := NumGet(buf, ((A_Index - 1) * 2 * w + col) * 4, "uint")
+            m := Max(m, ((c >> 16 & 0xFF) * 77 + (c >> 8 & 0xFF) * 150 + (c & 0xFF) * 29) >> 8)
+        }
+        if m > 20
+            left := x, dark := 0
+        else if (dark += 0.002) > 0.03
+            break
+    }
+    return left
+}
+
+; 게임 버튼 줄의 가장 왼쪽(left, 창 폭 비율) 바로 왼쪽에 "한 번 더"와 같은 크기·같은 줄로 그린다
+; (2000x1125 결과 화면 캡처에서 잰 값: 한 번 더 0.6355~0.7945w, 0.9271~0.9787h, 버튼 간격 0.0115w)
+WipeBtnShow(left := 0.6355) {
     try WinGetClientPos(&gx, &gy, &w, &h, GAME)
     catch
         return
-    bw := Round(w * 0.159), bh := Round(h * 0.0533), x := gx + Round(w * 0.465), y := gy + Round(h * 0.9271)
+    bw := Round(w * 0.159), bh := Round(h * 0.0533), y := gy + Round(h * 0.9271)
+    x := gx + Max(Round(w * 0.01), Round(w * (left - 0.0115)) - bw)
     bi := Buffer(40, 0), NumPut("uint", 40, "int", bw, "int", -bh, "ushort", 1, "ushort", 32, bi)
     sdc := DllCall("GetDC", "ptr", 0, "ptr")
     mdc := DllCall("CreateCompatibleDC", "ptr", sdc, "ptr")
