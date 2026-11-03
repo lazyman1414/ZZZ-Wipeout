@@ -220,7 +220,52 @@ namespace ZzzWipeout
                 else if ((dark += 0.002) > 0.03)
                     break;
             }
-            return left;
+            // 0.002w 간격이라 끝이 몇 px 안쪽에 잡힌다. 1px씩 왼쪽으로 더 따라가 정확한 끝을 찾는다
+            int px = (int)Math.Floor(w * left);
+            for (int col = px - 1, lim = px - Wipe.R(w * 0.003); col > lim && col > 0; col--)
+            {
+                int m = 0;
+                for (int i = 0; i < rows; i++)
+                    m = Math.Max(m, Lum(buf[i * w + col]));
+                if (m <= 20)
+                    break;
+                px = col;
+            }
+            return (double)px / w;
+        }
+
+        static int Lum(int c) => (((c >> 16) & 0xFF) * 77 + ((c >> 8) & 0xFF) * 150 + (c & 0xFF) * 29) >> 8;
+
+        // "완료" 버튼을 재서 위·아래 끝, 폭, "한 번 더"와의 간격을 px로 돌려준다 (못 재면 false).
+        // 버튼 속은 밝기 0~18, 테두리는 40~77이라 28을 넘으면 테두리로 본다
+        static bool DoneBox(int w, int h, int[] buf, int y0, int rows, out int top, out int bh, out int bw, out int gap)
+        {
+            top = bh = bw = gap = 0;
+            // "완료" 글자(0.87~0.90w) 왼쪽의 세로줄을 아래에서 위로: 검은 바탕 → 아래 테두리 → 속 → 위 테두리.
+            // 버튼 위쪽은 게임 배경이 밝게 보일 수 있어서 위에서부터 재지 않는다
+            int cx = Wipe.R(w * 0.83), b = rows - 1;
+            bool Lit(int i) => Lum(buf[i * w + cx]) > 28;
+            while (b > 0 && !Lit(b)) b--;
+            int t = b;
+            while (t > 0 && Lit(t - 1)) t--;
+            while (t > 0 && !Lit(t - 1)) t--;
+            while (t > 0 && Lit(t - 1)) t--;
+            if (b <= 0 || t <= 0 || b - t + 1 < h * 0.045 || b - t + 1 > h * 0.062)
+                return false;
+            int[] row = new int[w];
+            Array.Copy(buf, ((t + b) / 2) * w, row, 0, w);  // 가운데 줄: 둥근 양 끝이 세로로 서 있다
+            int Edge(int from, int dir)  // from에서 dir 쪽으로 속(어두움)을 지나 테두리가 끝나는 곳
+            {
+                int x = from;
+                while (x > 0 && x < w - 1 && Lum(row[x]) <= 28) x += dir;
+                while (x > 0 && x < w - 1 && Lum(row[x + dir]) > 28) x += dir;
+                return x;
+            }
+            int l = Edge(cx, -1), r = Edge(Wipe.R(w * 0.93), 1);
+            int prevR = l - 1;
+            while (prevR > 0 && Lum(row[prevR]) <= 28) prevR--;  // 왼쪽 버튼("한 번 더")의 오른쪽 끝
+            top = y0 + t; bh = b - t + 1; bw = r - l + 1; gap = l - prevR - 1;
+            return bw > w * 0.15 && bw < w * 0.17 && gap > w * 0.005 && gap < w * 0.02;
         }
 
         // 게임 버튼 줄의 가장 왼쪽(left, 창 폭 비율) 바로 왼쪽에 "한 번 더"와 같은 크기·같은 줄로 그린다
@@ -229,8 +274,14 @@ namespace ZzzWipeout
         {
             if (!GameClient(out int gx, out int gy, out int w, out int h))
                 return;
-            int bw = Wipe.R(w * 0.159), bh = Wipe.R(h * 0.0533), y = gy + Wipe.R(h * 0.9271);
-            int x = gx + Math.Max(Wipe.R(w * 0.01), Wipe.R(w * (left - 0.0115)) - bw);
+            int bw = Wipe.R(w * 0.159), bh = Wipe.R(h * 0.0533), y = Wipe.R(h * 0.9271), gap = Wipe.R(w * 0.0115);
+            int y0 = Wipe.R(h * 0.90), rows = h - y0;
+            if (DoneBox(w, h, Wipe.GrabLum(gx, gy + y0, w, rows), y0, rows, out int dt, out int dh, out int dw, out int dg))
+            {
+                y = dt; bh = dh; bw = dw; gap = dg;  // 게임 버튼과 크기·줄·간격을 px까지 같게
+            }
+            y += gy;
+            int x = gx + Math.Max(Wipe.R(w * 0.01), (int)Math.Round(w * left) - gap - bw);
             var c = new Canvas(bw, bh);
             D.BtnPaint(c.G, bw, bh, h, "와이프아웃 " + Wipe.Files.Count + "장");
             c.End(btn.Handle, x, y);
