@@ -236,21 +236,33 @@ namespace ZzzWipeout
 
         static int Lum(int c) => (((c >> 16) & 0xFF) * 77 + ((c >> 8) & 0xFF) * 150 + (c & 0xFF) * 29) >> 8;
 
-        // "완료" 버튼을 재서 위·아래 끝, 폭, "한 번 더"와의 간격을 px로 돌려준다 (못 재면 false).
+        // 오른쪽 끝 게임 버튼("완료" 자리)을 재서 위쪽 끝(창 안 px), 높이, 폭, 왼쪽 버튼과의 간격을 돌려준다.
+        // 글자와 상관없이 버튼 모양(검은 바탕 위 알약형 테두리)만 본다. 못 재면 false.
         // 버튼 속은 밝기 0~18, 테두리는 40~77이라 28을 넘으면 테두리로 본다
-        static bool DoneBox(int w, int h, int[] buf, int y0, int rows, out int top, out int bh, out int bw, out int gap)
+        static bool DoneBox(int gx, int gy, int w, int h, out int top, out int bh, out int bw, out int gap)
         {
             top = bh = bw = gap = 0;
-            // "완료" 글자(0.87~0.90w) 왼쪽의 세로줄을 아래에서 위로: 검은 바탕 → 아래 테두리 → 속 → 위 테두리.
-            // 버튼 위쪽은 게임 배경이 밝게 보일 수 있어서 위에서부터 재지 않는다
-            int cx = Wipe.R(w * 0.83), b = rows - 1;
-            bool Lit(int i) => Lum(buf[i * w + cx]) > 28;
-            while (b > 0 && !Lit(b)) b--;
-            int t = b;
-            while (t > 0 && Lit(t - 1)) t--;
-            while (t > 0 && !Lit(t - 1)) t--;
-            while (t > 0 && Lit(t - 1)) t--;
-            if (b <= 0 || t <= 0 || b - t + 1 < h * 0.045 || b - t + 1 > h * 0.062)
+            int y0 = Wipe.R(h * 0.90), rows = h - y0;
+            int[] buf = Wipe.GrabLum(gx, gy + y0, w, rows);
+            // 글자(가운데 0.87~0.90w)를 피한 세로줄을 아래에서 위로: 검은 바탕 → 아래 테두리 → 속 → 위 테두리.
+            // 버튼 위쪽은 게임 배경이 밝게 보일 수 있어서 위에서부터 재지 않는다. 글자가 길어 걸릴 때를 위해 양쪽 두 줄을 차례로 본다
+            // (둥근 끝(버튼 높이의 절반) 안쪽이어야 높이가 제대로 잡힌다)
+            int t = 0, b = 0;
+            foreach (double fx in new[] { 0.83, 0.95 })
+            {
+                int cx = Wipe.R(w * fx);
+                bool Lit(int i) => Lum(buf[i * w + cx]) > 28;
+                b = rows - 1;
+                while (b > 0 && !Lit(b)) b--;
+                t = b;
+                while (t > 0 && Lit(t - 1)) t--;
+                while (t > 0 && !Lit(t - 1)) t--;
+                while (t > 0 && Lit(t - 1)) t--;
+                if (b > 0 && t > 0 && b - t + 1 >= h * 0.045 && b - t + 1 <= h * 0.062)
+                    break;
+                b = 0;
+            }
+            if (b == 0)
                 return false;
             int[] row = new int[w];
             Array.Copy(buf, ((t + b) / 2) * w, row, 0, w);  // 가운데 줄: 둥근 양 끝이 세로로 서 있다
@@ -261,7 +273,7 @@ namespace ZzzWipeout
                 while (x > 0 && x < w - 1 && Lum(row[x + dir]) > 28) x += dir;
                 return x;
             }
-            int l = Edge(cx, -1), r = Edge(Wipe.R(w * 0.93), 1);
+            int l = Edge(Wipe.R(w * 0.815), -1), r = Edge(Wipe.R(w * 0.93), 1);
             int prevR = l - 1;
             while (prevR > 0 && Lum(row[prevR]) <= 28) prevR--;  // 왼쪽 버튼("한 번 더")의 오른쪽 끝
             top = y0 + t; bh = b - t + 1; bw = r - l + 1; gap = l - prevR - 1;
@@ -275,8 +287,7 @@ namespace ZzzWipeout
             if (!GameClient(out int gx, out int gy, out int w, out int h))
                 return;
             int bw = Wipe.R(w * 0.159), bh = Wipe.R(h * 0.0533), y = Wipe.R(h * 0.9271), gap = Wipe.R(w * 0.0115);
-            int y0 = Wipe.R(h * 0.90), rows = h - y0;
-            if (DoneBox(w, h, Wipe.GrabLum(gx, gy + y0, w, rows), y0, rows, out int dt, out int dh, out int dw, out int dg))
+            if (DoneBox(gx, gy, w, h, out int dt, out int dh, out int dw, out int dg))
             {
                 y = dt; bh = dh; bw = dw; gap = dg;  // 게임 버튼과 크기·줄·간격을 px까지 같게
             }
@@ -306,10 +317,14 @@ namespace ZzzWipeout
             return o;
         }
 
+        // 도전 결과 화면: (1) 위쪽 검은 띠 + 오른쪽 아래 알약형 버튼 모양, 또는 (2) "완료" 글자.
+        // 와이프아웃을 찍은 뒤에만 보므로 모양만으로 충분하다. 글자가 다르거나 버튼이 바뀐 결과 화면도 (1)로 알아본다
         static bool ResultScreen()
         {
             if (!GameClient(out int cx, out int cy, out int w, out int h))
                 return false;
+            if (TopDark(cx, cy, w, h) && DoneBox(cx, cy, w, h, out _, out _, out _, out _))
+                return true;
             // 흰 지점·검은 지점이 각각 85% 이상 맞으면 일치
             double[] lum = Sample(cx, cy, w, h);
             int okw = 0, okd = 0, nw = 0;
@@ -322,6 +337,21 @@ namespace ZzzWipeout
                 else
                     okd += lum[i] < 70 ? 1 : 0;
             return okw >= nw * 0.85 && okd >= (DONE.Count - nw) * 0.85;
+        }
+
+        // 결과 화면 위쪽(0.005~0.06h)은 검은 띠다 (전투·와이프아웃 화면은 밝다). 8px·2줄 간격으로 98% 이상이 밝기 12 미만이면 검은 띠
+        static bool TopDark(int gx, int gy, int w, int h)
+        {
+            int y0 = Wipe.R(h * 0.005), rows = Wipe.R(h * 0.06) - y0, tot = 0, dark = 0;
+            int[] buf = Wipe.GrabLum(gx, gy + y0, w, rows);
+            for (int i = 0; i < rows; i += 2)
+                for (int x = 0; x < w; x += 8)
+                {
+                    tot++;
+                    if (Lum(buf[i * w + x]) < 12)
+                        dark++;
+                }
+            return tot > 0 && dark >= tot * 0.98;
         }
 
         // 지점들을 감싸는 영역만 한 번 캡처해서 밝기를 읽음
