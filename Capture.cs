@@ -635,8 +635,9 @@ namespace ZzzWipeout
             double g = T(() => f = GrabFull(x, y, w, h, f));
             double s = T(() => GetStats(Shrink(f), null));
             double v = T(() => GameView(out _, out _, out _, out _));
+            double rs = T(() => App.ResultScreen());
             f.Free();
-            return string.Format(IC, "게임 창 {0}x{1}, 게임 영역 {2}x{3} / 영역 재기 {4:F1}ms, 영역 찍기 {5:F1}ms, 줄여서 판별 {6:F1}ms, 판별 중 GameView {7:F2}ms", cw, ch, w, h, m, g, s, v);
+            return string.Format(IC, "게임 창 {0}x{1}, 게임 영역 {2}x{3} / 영역 재기 {4:F1}ms, 영역 찍기 {5:F1}ms, 줄여서 판별 {6:F1}ms, 판별 중 GameView {7:F2}ms, 결과 화면 판단 {8:F1}ms", cw, ch, w, h, m, g, s, v, rs);
         }
 
         // 파일 이름이 .jpg면 품질 95 JPG(2560x1440 기준 PNG의 4분의 1 안팎), 아니면 무손실 PNG로 저장

@@ -233,20 +233,21 @@ namespace ZzzWipeout
                 BtnHide();
                 return;
             }
-            if (ResultScreen())
+            List<Rectangle> row = null;
+            if (Wipe.GameView(out int gx, out int gy, out int w, out int h))
+                row = ButtonRow(gx, gy, w, h);
+            if (row != null)
             {
                 away = 0;
                 Wipe.Seen = true;
                 if (IsWindowVisible(btn.Handle))
                     return;
                 // 버튼 줄이 다 나타날 때까지 기다린다: 가장 왼쪽 끝이 0.1초 간격으로 세 번 같으면 그 왼쪽에 띄운다
-                if (!Wipe.GameView(out int gx, out int gy, out int w, out int h))
-                    return;
-                int left = BtnLeft(gx, gy, w, h);
+                int left = BtnLeft(gx, gy, w, h, row);
                 same = Math.Abs(left - lastLeft) <= h * 0.009 ? same + 1 : 0;
                 lastLeft = left;
                 if (same >= 2)
-                    BtnShow(left);
+                    BtnShow(BtnRect(gx, gy, h, left, row), h);
                 return;
             }
             lastLeft = -1;
@@ -269,26 +270,96 @@ namespace ZzzWipeout
                 ShowWindow(btn.Handle, 0);
         }
 
-        // ---- 결과 화면의 위치 기준 ----
-        // 결과 화면 아래 버튼 줄은 게임 화면 오른쪽 끝에 붙어 있고 크기는 화면 높이에 비례한다 (게임 UI가 높이 기준으로 늘고 줄어듦).
-        // 그래서 가로 위치는 "게임 영역 오른쪽 끝에서 높이의 몇 배" (A), 세로 위치는 "높이의 몇 배"로 잰다.
-        // 값은 16:9(2000x1125) 결과 화면에서 잰 가로 비율 x를 A = (1 - x) * 16 / 9로 바꾼 것. 모니터 비율이 달라 게임이
-        // 양옆을 비우든(GameView가 뺌) 넓게 그리든 같은 자리를 가리킨다
-        static int RX(int w, int h, double a) => w - Wipe.R(h * a);  // 게임 영역 안 x
+        // ---- 도전 결과 화면 ----
+        // 결과 화면 아래에는 알약 모양 게임 버튼("한 번 더", "완료" 등)이 같은 높이로 나란히 놓인다. 버튼은 검은 바탕 위에 밝은 테두리
+        // (밝기 40~77)이고 속은 어둡다(0~18). 위치는 가정하지 않는다: 모니터 비율, 검은 띠를 없애는 모드 등에 따라 버튼 줄이
+        // 오른쪽 끝에 붙기도 하고 가운데 16:9 안에 있기도 해서, 화면 아래쪽 전체에서 버튼 모양을 직접 찾는다.
+        // 크기는 화면 높이(h)에 비례한다 (16:9 결과 화면에서 잰 값: 버튼 높이 0.0533h, 완료 버튼 폭 0.2836h, 버튼 간격 0.0204h)
+
+        static int Lum(int c) => (((c >> 16) & 0xFF) * 77 + ((c >> 8) & 0xFF) * 150 + (c & 0xFF) * 29) >> 8;
+
+        // 화면 아래쪽(0.86h~)의 게임 버튼 줄(게임 영역 안 좌표, 왼쪽부터). 같은 줄에 같은 높이로 게임 간격만큼 떨어진 버튼이 2개 이상이고
+        // 가장 오른쪽 버튼이 완료 버튼 크기일 때만 돌려준다. 없으면 null
+        static string Dbg = "";
+        static List<Rectangle> ButtonRow(int gx, int gy, int w, int h)
+        {
+            int y0 = Wipe.R(h * 0.86), rows = h - y0;
+            int[] buf = Wipe.GrabLum(gx, gy + y0, w, rows);
+            var L = new byte[buf.Length];
+            for (int i = 0; i < buf.Length; i++)
+                L[i] = (byte)Lum(buf[i]);
+            bool Lit(int x, int y) => L[y * w + x] > 28;
+            // 1) 테두리의 곧은 위아래 선: 밝은 점이 0.15~0.5h 이어지는 가로 줄 (더 긴 줄은 버튼이 아닌 배경·패널)
+            int minRun = Wipe.R(h * 0.15), maxRun = Wipe.R(h * 0.5), tol = Math.Max(2, Wipe.R(h * 0.006));
+            var runs = new List<(int y, int x1, int x2)>();
+            for (int y = 0; y < rows; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    if (!Lit(x, y))
+                        continue;
+                    int s = x;
+                    while (x < w && Lit(x, y)) x++;
+                    if (x - s >= minRun && x - s <= maxRun)
+                        runs.Add((y, s, x - 1));
+                }
+            // 2) 알약 버튼: 위 선 아래로 버튼 높이(0.045~0.062h)만큼 떨어져 시작·끝이 같은 아래 선이 있고, 가운데 줄에서 곧은 선이 시작하는 곳은
+            //    속(어두움)이며, 둥근 양 끝까지 잰 폭이 곧은 선 길이 + 높이와 맞는 것
+            var btns = new List<Rectangle>();
+            int hMin = (int)Math.Ceiling(h * 0.045), hMax = (int)(h * 0.062);
+            foreach (var a in runs)
+            {
+                int bestB = -1;
+                foreach (var b in runs)
+                    if (b.y - a.y + 1 >= hMin && b.y - a.y + 1 <= hMax && Math.Abs(a.x1 - b.x1) <= tol && Math.Abs(a.x2 - b.x2) <= tol)
+                        bestB = Math.Max(bestB, b.y);
+                if (bestB < 0)
+                    continue;
+                int m = (a.y + bestB) / 2, bh = bestB - a.y + 1;
+                if (Lit(a.x1 + tol, m) || Lit(a.x2 - tol, m))
+                    continue;
+                int Edge(int from, int dir)  // from(버튼 속, 글자보다 바깥)에서 dir 쪽으로 속을 지나 테두리 끝까지
+                {
+                    int x = from;
+                    while (x > 0 && x < w - 1 && !Lit(x, m)) x += dir;
+                    while (x > 0 && x < w - 1 && Lit(x + dir, m)) x += dir;
+                    return x;
+                }
+                int l = Edge(a.x1 + tol, -1), r = Edge(a.x2 - tol, 1);
+                if (Math.Abs((r - l + 1) - (a.x2 - a.x1 + 1 + bh)) > bh / 2)
+                    continue;
+                var rc = new Rectangle(l, y0 + a.y, r - l + 1, bh);
+                // 테두리가 2~3px 두께라 같은 버튼이 여러 번 잡힌다: 가로로 겹치면 더 큰 쪽만
+                int k = btns.FindIndex(o => o.Left <= rc.Right && rc.Left <= o.Right);
+                if (k < 0)
+                    btns.Add(rc);
+                else if (rc.Height > btns[k].Height)
+                    btns[k] = rc;
+            }
+            Dbg = $"선 {runs.Count}개, 버튼 " + string.Join(" ", btns.Select(o => $"[{o.Left},{o.Top} {o.Width}x{o.Height}]"));
+            // 3) 가장 오른쪽 버튼과 같은 줄(위 끝·높이가 2px 안)에 있는 버튼들
+            if (btns.Count < 2)
+                return null;
+            btns.Sort((p, q) => p.Left.CompareTo(q.Left));
+            Rectangle done = btns[btns.Count - 1];
+            var row = btns.Where(o => Math.Abs(o.Top - done.Top) <= 2 && Math.Abs(o.Height - done.Height) <= 2).ToList();
+            if (row.Count < 2 || done.Width < h * 0.267 || done.Width > h * 0.302)
+                return null;
+            int gap = done.Left - row[row.Count - 2].Right - 1;
+            return gap >= h * 0.009 && gap <= h * 0.036 ? row : null;
+        }
 
         // 결과 화면 아래 줄에서 게임이 그린 것(버튼, "한 번 더" 왼쪽에 붙는 배터리 칸 등) 중 가장 왼쪽 끝(게임 영역 안 x)을 돌려준다.
-        // 결과마다 왼쪽에 붙는 것이 달라서 매번 잰다. 바탕은 검정(밝기 0), 버튼은 테두리·글자가 밝고 속은 위아래로 밝기가 달라서
-        // 버튼 높이(0.932~0.977h)를 세로로 훑은 최댓값이 20을 넘으면 무언가 있는 칸으로 본다.
-        // "완료" 버튼 안(A 0.213)에서 왼쪽으로 1px씩 따라가다 빈 칸이 0.053h보다 길게 이어지면(버튼 간격은 0.020h) 멈춘다
-        static int BtnLeft(int gx, int gy, int w, int h)
+        // 결과마다 왼쪽에 붙는 것이 달라서 매번 잰다. 버튼 줄 높이를 세로로 훑은 최댓값이 20을 넘으면 무언가 있는 칸으로 보고,
+        // 버튼 줄의 가장 왼쪽 버튼에서 왼쪽으로 1px씩 따라가다 빈 칸이 0.053h보다 길게 이어지면(버튼 간격은 0.020h) 멈춘다
+        static int BtnLeft(int gx, int gy, int w, int h, List<Rectangle> row)
         {
-            int rows = Wipe.R(h * 0.045);
-            int[] buf = Wipe.GrabLum(gx, gy + Wipe.R(h * 0.932), w, rows);
-            int left = RX(w, h, 0.2133), dark = 0, gapMax = Wipe.R(h * 0.0533);
+            Rectangle b = row[0];
+            int[] buf = Wipe.GrabLum(gx, gy + b.Top, w, b.Height);
+            int left = b.Left, dark = 0, gapMax = Wipe.R(h * 0.0533);
             for (int x = left - 1; x > 0; x--)
             {
                 int m = 0;
-                for (int i = 0; i < rows; i++)
+                for (int i = 0; i < b.Height; i++)
                     m = Math.Max(m, Lum(buf[i * w + x]));
                 if (m > 20)
                 {
@@ -301,71 +372,16 @@ namespace ZzzWipeout
             return left;
         }
 
-        static int Lum(int c) => (((c >> 16) & 0xFF) * 77 + ((c >> 8) & 0xFF) * 150 + (c & 0xFF) * 29) >> 8;
-
-        // 오른쪽 끝 게임 버튼("완료" 자리)을 재서 위쪽 끝(게임 영역 안 y), 높이, 폭, 왼쪽 버튼과의 간격을 돌려준다.
-        // 글자와 상관없이 버튼 모양(검은 바탕 위 알약형 테두리)만 본다. 못 재면 false.
-        // 버튼 속은 밝기 0~18, 테두리는 40~77이라 28을 넘으면 테두리로 본다
-        static bool DoneBox(int gx, int gy, int w, int h, out int top, out int bh, out int bw, out int gap)
+        // 결과 화면 버튼의 자리(화면 좌표): 게임 버튼 줄의 가장 왼쪽(left, 게임 영역 안 x) 바로 왼쪽에 완료 버튼과 같은 크기·같은 줄·같은 간격
+        public static Rectangle BtnRect(int gx, int gy, int h, int left, List<Rectangle> row)
         {
-            top = bh = bw = gap = 0;
-            int y0 = Wipe.R(h * 0.90), rows = h - y0;
-            int[] buf = Wipe.GrabLum(gx, gy + y0, w, rows);
-            // 글자를 피한 세로줄을 아래에서 위로: 검은 바탕 → 아래 테두리 → 속 → 위 테두리.
-            // 버튼 위쪽은 게임 배경이 밝게 보일 수 있어서 위에서부터 재지 않는다. 글자가 길어 걸릴 때를 위해 양쪽 두 줄을 차례로 본다
-            // (둥근 끝(버튼 높이의 절반) 안쪽이어야 높이가 제대로 잡힌다)
-            int t = 0, b = 0;
-            foreach (double a in new[] { 0.3022, 0.0889 })
-            {
-                int cx = RX(w, h, a);
-                if (cx < 0 || cx >= w)
-                    continue;
-                bool Lit(int i) => Lum(buf[i * w + cx]) > 28;
-                b = rows - 1;
-                while (b > 0 && !Lit(b)) b--;
-                t = b;
-                while (t > 0 && Lit(t - 1)) t--;
-                while (t > 0 && !Lit(t - 1)) t--;
-                while (t > 0 && Lit(t - 1)) t--;
-                if (b > 0 && t > 0 && b - t + 1 >= h * 0.045 && b - t + 1 <= h * 0.062)
-                    break;
-                b = 0;
-            }
-            if (b == 0)
-                return false;
-            int[] row = new int[w];
-            Array.Copy(buf, ((t + b) / 2) * w, row, 0, w);  // 가운데 줄: 둥근 양 끝이 세로로 서 있다
-            int Edge(int from, int dir)  // from에서 dir 쪽으로 속(어두움)을 지나 테두리가 끝나는 곳
-            {
-                int x = from;
-                while (x > 0 && x < w - 1 && Lum(row[x]) <= 28) x += dir;
-                while (x > 0 && x < w - 1 && Lum(row[x + dir]) > 28) x += dir;
-                return x;
-            }
-            int l = Edge(Math.Max(1, RX(w, h, 0.3289)), -1), r = Edge(Math.Max(1, RX(w, h, 0.1244)), 1);
-            int prevR = l - 1;
-            while (prevR > 0 && Lum(row[prevR]) <= 28) prevR--;  // 왼쪽 버튼("한 번 더")의 오른쪽 끝
-            top = y0 + t; bh = b - t + 1; bw = r - l + 1; gap = l - prevR - 1;
-            return bw > h * 0.2667 && bw < h * 0.3022 && gap > h * 0.0089 && gap < h * 0.0356;
+            Rectangle done = row[row.Count - 1];
+            int gap = done.Left - row[row.Count - 2].Right - 1;
+            return new Rectangle(gx + Math.Max(Wipe.R(h * 0.0178), left - gap - done.Width), gy + done.Top, done.Width, done.Height);
         }
 
-        // 결과 화면 버튼의 자리(화면 좌표): 게임 버튼 줄의 가장 왼쪽(left, 게임 영역 안 x) 바로 왼쪽에 "한 번 더"와 같은 크기·같은 줄
-        // (못 재면 16:9 결과 화면에서 잰 값: 한 번 더 폭 0.2827h, 0.9271~0.9787h, 버튼 간격 0.0204h)
-        public static Rectangle BtnRect(int gx, int gy, int w, int h, int left)
+        static void BtnShow(Rectangle r, int h)
         {
-            int bw = Wipe.R(h * 0.2827), bh = Wipe.R(h * 0.0533), y = Wipe.R(h * 0.9271), gap = Wipe.R(h * 0.0204);
-            if (DoneBox(gx, gy, w, h, out int dt, out int dh, out int dw, out int dg))
-            {
-                y = dt; bh = dh; bw = dw; gap = dg;  // 게임 버튼과 크기·줄·간격을 px까지 같게
-            }
-            return new Rectangle(gx + Math.Max(Wipe.R(h * 0.0178), left - gap - bw), gy + y, bw, bh);
-        }
-
-        static void BtnShow(int left)
-        {
-            if (!Wipe.GameView(out int gx, out int gy, out int w, out int h))
-                return;
-            Rectangle r = BtnRect(gx, gy, w, h, left);
             var c = new Canvas(r.Width, r.Height);
             D.BtnPaint(c.G, r.Width, r.Height, h, "와이프아웃 " + Wipe.Files.Count + "장");
             c.End(btn.Handle, r.X, r.Y);
@@ -373,96 +389,20 @@ namespace ZzzWipeout
                 ShowWindow(btn.Handle, 4);  // SW_SHOWNOACTIVATE
         }
 
-        // ---- 도전 결과 화면 ----
-        // "완료" 글자의 흰 획 위 점과 획 사이 검은 점 (16:9에서 잰 가로 비율, 높이 비율)
-        static readonly List<(double a, double y, bool white)> DONE = Pts(
-            "0.8738,0.9549 0.8758,0.9542 0.8770,0.9514 0.8777,0.9611 0.8797,0.9458 0.8820,0.9563 0.8832,0.9458 0.8840,0.9486 0.8887,0.9507 0.8895,0.9590 0.8910,0.9486 0.8926,0.9486 0.8938,0.9576 0.8953,0.9493",
-            "0.8703,0.9361 0.8711,0.9535 0.8723,0.9375 0.8734,0.9396 0.8766,0.9667 0.8805,0.9660 0.8844,0.9674 0.8867,0.9639 0.8898,0.9389 0.8930,0.9396 0.8961,0.9403 0.8984,0.9500 0.8992,0.9674 0.9004,0.9514");
-
-        // 가로 비율 x는 오른쪽 끝 기준 A로 바꿔 둔다
-        static List<(double, double, bool)> Pts(string white, string dark)
-        {
-            var o = new List<(double, double, bool)>();
-            foreach (var (s, wt) in new[] { (dark, false), (white, true) })  // AutoHotkey판과 같은 순서 (검은 점 먼저)
-                foreach (string xy in s.Split(' '))
-                {
-                    string[] p = xy.Split(',');
-                    double x = double.Parse(p[0], System.Globalization.CultureInfo.InvariantCulture);
-                    o.Add(((1 - x) * 16 / 9, double.Parse(p[1], System.Globalization.CultureInfo.InvariantCulture), wt));
-                }
-            return o;
-        }
-
-        // 도전 결과 화면: (1) 위쪽 검은 띠 + 오른쪽 아래 알약형 버튼 모양, 또는 (2) "완료" 글자.
-        // 와이프아웃을 찍은 뒤에만 보므로 모양만으로 충분하다. 글자가 다르거나 버튼이 바뀐 결과 화면도 (1)로 알아본다
-        public static bool ResultScreen()
-        {
-            if (!Wipe.GameView(out int gx, out int gy, out int w, out int h))
-                return false;
-            if (TopDark(gx, gy, w, h) && DoneBox(gx, gy, w, h, out _, out _, out _, out _))
-                return true;
-            // 흰 지점·검은 지점이 각각 85% 이상 맞으면 일치
-            double[] lum = Sample(gx, gy, w, h);
-            int okw = 0, okd = 0, nw = 0;
-            for (int i = 0; i < DONE.Count; i++)
-                if (DONE[i].white)
-                {
-                    nw++;
-                    okw += lum[i] > 170 ? 1 : 0;
-                }
-                else
-                    okd += lum[i] < 70 ? 1 : 0;
-            return okw >= nw * 0.85 && okd >= (DONE.Count - nw) * 0.85;
-        }
-
-        // 결과 화면 위쪽(0.005~0.06h)은 검은 띠다 (전투·와이프아웃 화면은 밝다). 8px·2줄 간격으로 80% 이상이 밝기 12 미만이면 검은 띠
-        static bool TopDark(int gx, int gy, int w, int h)
-        {
-            int y0 = Wipe.R(h * 0.005), rows = Wipe.R(h * 0.06) - y0, tot = 0, dark = 0;
-            int[] buf = Wipe.GrabLum(gx, gy + y0, w, rows);
-            for (int i = 0; i < rows; i += 2)
-                for (int x = 0; x < w; x += 8)
-                {
-                    tot++;
-                    if (Lum(buf[i * w + x]) < 12)
-                        dark++;
-                }
-            return tot > 0 && dark >= tot * 0.8;  // 버프 글자·"자동 분해" 버튼이 있는 결과 화면은 0.89
-        }
-
-        // 지점들을 감싸는 영역만 한 번 캡처해서 밝기를 읽음
-        static double[] Sample(int gx, int gy, int w, int h)
-        {
-            var xy = new List<(int x, int y)>();
-            int x0 = 99999, y0 = 99999, x1 = 0, y1 = 0;
-            foreach (var p in DONE)
-            {
-                int x = RX(w, h, p.a), y = Wipe.R(h * p.y);
-                xy.Add((x, y));
-                x0 = Math.Min(x0, x); y0 = Math.Min(y0, y); x1 = Math.Max(x1, x); y1 = Math.Max(y1, y);
-            }
-            int bw = x1 - x0 + 1;
-            int[] buf = Wipe.GrabLum(gx + x0, gy + y0, bw, y1 - y0 + 1);
-            var o = new double[xy.Count];
-            for (int i = 0; i < xy.Count; i++)
-            {
-                int c = buf[(xy[i].y - y0) * bw + xy[i].x - x0];
-                o[i] = ((c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF)) / 3.0;
-            }
-            return o;
-        }
+        public static bool ResultScreen() => Wipe.GameView(out int gx, out int gy, out int w, out int h) && ButtonRow(gx, gy, w, h) != null;
 
         // 검사(--resulttest): 결과 화면 판단과 버튼 자리를 화면 대신 지금 FakeScreen 그림으로 계산해 한 줄로 돌려준다
         public static string ResultInfo()
         {
             if (!Wipe.GameView(out int gx, out int gy, out int w, out int h))
                 return "게임 영역 못 찾음";
-            bool shape = TopDark(gx, gy, w, h) && DoneBox(gx, gy, w, h, out _, out _, out _, out _);
-            bool ok = ResultScreen();
-            DoneBox(gx, gy, w, h, out int dt, out int dh, out int dw, out int dg);
-            int left = BtnLeft(gx, gy, w, h);
-            Rectangle r = BtnRect(gx, gy, w, h, left);
-            return $"게임 영역 {gx},{gy} {w}x{h} / 결과 화면 {(ok ? "예" : "아니오")} (모양 {(shape ? "예" : "아니오")}) / 완료 버튼 위 {gy + dt} 높이 {dh} 폭 {dw} 간격 {dg} / 게임 버튼 줄 왼쪽 끝 {gx + left} / 우리 버튼 {r.X},{r.Y} {r.Width}x{r.Height}";
+            var row = ButtonRow(gx, gy, w, h);
+            if (row == null)
+                return $"게임 영역 {gx},{gy} {w}x{h} / 결과 화면 아니오 / {Dbg}";
+            Rectangle done = row[row.Count - 1];
+            int left = BtnLeft(gx, gy, w, h, row);
+            Rectangle r = BtnRect(gx, gy, h, left, row);
+            return $"게임 영역 {gx},{gy} {w}x{h} / 결과 화면 예 / 버튼 {row.Count}개, 완료 버튼 {gx + done.Left},{gy + done.Top} {done.Width}x{done.Height} 간격 {done.Left - row[row.Count - 2].Right - 1} / 게임 버튼 줄 왼쪽 끝 {gx + left} / 우리 버튼 {r.X},{r.Y} {r.Width}x{r.Height}";
         }
 
         // ---- 창 열기·닫기 ----
