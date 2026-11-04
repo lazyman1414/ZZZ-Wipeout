@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -22,24 +22,24 @@ namespace ZzzWipeout
             Wipe.LogFile = Path.Combine(outDir, "log.txt");
             Cfg.Per = 3; Cfg.Auto = false; Cfg.Debug = false; Cfg.Png = false;
 
-            int idx = 0;
             var sel = new StringBuilder();
             Wipe.ReplaySaved = (f, name) => sel.Append(Path.GetFileName(name) + " " + f.Src + "\n");
-            Wipe.ReplayGrab = (w, h, f) => idx < files.Length ? Load(files[idx], f, idx + 1) : Black(w, h, f, idx + 1);  // 영상이 끝나면 검은 화면
+            Wipe.Replaying = true;
+            Frame screen = null;
+            void Show(int i)  // i번째(0부터) 프레임을 화면으로. 영상이 끝나면 검은 화면
+            {
+                screen = i < files.Length ? Load(files[i], screen, i + 1) : Black(screen.W, screen.H, screen, i + 1);
+                Wipe.FakeScreen = screen;
+            }
 
-            // 시작: 위쪽 줄이 노래지는 첫 프레임 (실제 프로그램의 0.1초 감시와 같은 규칙)
-            Frame tmp = null;
+            // 시작: 위쪽 줄이 노래지는 첫 프레임 (실제 프로그램의 0.1초 감시와 같은 규칙. 그 전 프레임으로 게임 영역도 익힌다)
             int start = -1;
             for (int i = 0; i < files.Length && start < 0; i++)
             {
-                tmp = Load(files[i], tmp, i + 1);
-                Wipe.ReplayW = tmp.W; Wipe.ReplayH = tmp.H;
-                var row = new int[tmp.W];
-                Marshal.Copy(tmp.Bits + Wipe.R(tmp.H * 0.06) * tmp.W * 4, row, 0, tmp.W);
-                if (Wipe.TopRow(row, tmp.W, true))
+                Show(i);
+                if (Wipe.Top(true))
                     start = i;
             }
-            tmp?.Free();
             if (start < 0)
             {
                 File.WriteAllText(Path.Combine(outDir, "selected.txt"), "시작 못 찾음\n");
@@ -47,12 +47,30 @@ namespace ZzzWipeout
             }
             Wipe.ReplayNow = 100000;
             Wipe.Start();
-            for (idx = start + 1; Wipe.On && idx < files.Length + 40; idx++)
+            for (int idx = start + 1; Wipe.On && idx < files.Length + 40; idx++)
             {
+                Show(idx);
                 Wipe.ReplayNow += 45;
                 Wipe.Tick();
             }
             File.WriteAllText(Path.Combine(outDir, "selected.txt"), "시작 " + (start + 1) + (Wipe.On ? " (프레임이 모자라 안 끝남)" : "") + "\n" + sel);
+        }
+
+        // 결과 화면 검사 (ZZZ-Wipeout.exe --resulttest 결과파일 그림...): 그림을 차례로 화면 대신 넣고, 그림마다 결과 화면 판단과
+        // 버튼 자리를 결과파일에 한 줄씩 남긴다. 게임 영역은 앞서 넣은 그림까지 모두 보고 정한다 (실제로 전투 화면을 거치는 것처럼)
+        public static void ResultTest(string[] args)
+        {
+            var o = new StringBuilder();
+            Frame screen = null;
+            for (int i = 2; i < args.Length; i++)
+            {
+                screen = Load(args[i], screen, i);
+                Wipe.FakeScreen = screen;
+                for (int k = 0; k < 5; k++)
+                    Wipe.GameView(out _, out _, out _, out _);
+                o.Append(Path.GetFileName(args[i]) + ": " + App.ResultInfo() + "\n");
+            }
+            File.WriteAllText(args[1], o.ToString());
         }
 
         static Frame Black(int w, int h, Frame f, int src)

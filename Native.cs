@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -98,7 +98,7 @@ namespace ZzzWipeout
         const string GAME_EXE = "ZenlessZoneZero.exe";
         static readonly Dictionary<uint, bool> isGamePid = new Dictionary<uint, bool>();
 
-        static bool IsGame(IntPtr hwnd)
+        public static bool IsGame(IntPtr hwnd)
         {
             GetWindowThreadProcessId(hwnd, out uint pid);
             if (pid == 0)
@@ -121,12 +121,35 @@ namespace ZzzWipeout
             return g;
         }
 
-        // WinActive(GAME)
+        // WinActive(GAME). 게임 위에 띄운 우리 창이 포커스를 잠시 가져온 상태(App.Grab)도 게임 중으로 본다
         public static bool GameActive()
         {
             IntPtr fg = GetForegroundWindow();
-            return fg != IntPtr.Zero && IsGame(fg);
+            return fg != IntPtr.Zero && (IsGame(fg) || App.Grabbed(fg));
         }
+
+        [DllImport("user32")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+        [DllImport("kernel32")] public static extern uint GetCurrentThreadId();
+        [DllImport("user32")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+        [DllImport("user32", EntryPoint = "SetWindowLongPtrW")] public static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+        [DllImport("user32")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+        [DllImport("user32")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        // 다른 프로그램이 앞에 있어도 h를 앞으로 가져온다 (앞 창의 입력 스레드에 잠깐 붙어서 SetForegroundWindow 제한을 피함)
+        public static bool ForceForeground(IntPtr h)
+        {
+            IntPtr fg = GetForegroundWindow();
+            if (fg == h)
+                return true;
+            uint ft = GetWindowThreadProcessId(fg, out _), me = GetCurrentThreadId();
+            bool att = ft != 0 && ft != me && AttachThreadInput(me, ft, true);
+            SetForegroundWindow(h);
+            if (att)
+                AttachThreadInput(me, ft, false);
+            return GetForegroundWindow() == h;
+        }
+
+        [DllImport("user32")] public static extern int GetWindowLong(IntPtr hwnd, int index);
 
         // 게임 창: 앞에 있으면 그 창, 아니면 보이는 창 중 가장 위의 게임 창 (AutoHotkey의 WinExist 순서와 같다)
         public static IntPtr GameWindow()
@@ -151,6 +174,11 @@ namespace ZzzWipeout
         public static bool GameClient(out int x, out int y, out int w, out int h)
         {
             x = y = w = h = 0;
+            if (Wipe.FakeScreen != null)  // 검사: 그림 전체가 게임 창
+            {
+                w = Wipe.FakeScreen.W; h = Wipe.FakeScreen.H;
+                return true;
+            }
             IntPtr hw = GameWindow();
             if (hw == IntPtr.Zero || !GetClientRect(hw, out RECT r))
                 return false;

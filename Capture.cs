@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -67,9 +67,10 @@ namespace ZzzWipeout
         public static string Dir = Path.Combine(Path.GetTempPath(), "ZZZ-Wipeout");
         public static string LogFile = Path.Combine(Path.GetTempPath(), "ZZZ-Wipeout.log");
 
-        // 재생 검사(Replay.cs): 화면 대신 저장한 프레임을 넣고, 시계를 프레임 간격으로 돌린다
-        public static Func<int, int, Frame, Frame> ReplayGrab;
-        public static int ReplayW, ReplayH, ReplayNow;
+        // 검사(Replay.cs, ResultTest): 화면 대신 이 그림을 읽는다 (게임 창 = 그림 전체). 재생 검사는 시계도 프레임 간격으로 돌린다
+        public static Frame FakeScreen;
+        public static bool Replaying;
+        public static int ReplayNow;
         public static Action<Frame, string> ReplaySaved;
         public const int W = 128, H = 72;
         public static double Ratio = 9.0 / 16;
@@ -89,7 +90,7 @@ namespace ZzzWipeout
 
         static readonly CultureInfo IC = CultureInfo.InvariantCulture;
         public static int R(double x) => (int)Math.Round(x, MidpointRounding.AwayFromZero);
-        static int Now => ReplayGrab != null ? ReplayNow : Environment.TickCount;
+        static int Now => Replaying ? ReplayNow : Environment.TickCount;
 
         // 주황~노랑(색상 약 25~55도)이고 채도가 높으면 노란색. 맵이 어두우면 노란 화면도 어두워서 밝기는 낮게(R>90) 본다
         static bool Yellow(uint c)
@@ -106,25 +107,32 @@ namespace ZzzWipeout
         static int topLogged;
         public static bool Top(bool cursor)
         {
-            if (!GameClient(out int gx, out int gy, out int w, out int h))
+            if (!GameView(out int gx, out int gy, out int w, out int h))
                 return false;
             return TopRow(GrabLum(gx, gy + R(h * 0.06), w, 1), w, cursor);
         }
 
+        // 완전한 검정 점(게임 영역을 아직 모를 때 들어온 화면 비율 차이의 검은 띠)은 빼고, 남은 점의 절반 이상이 노란지 본다
         public static bool TopRow(int[] buf, int w, bool cursor)
         {
-            int n = 0;
+            int n = 0, lit = 0;
             for (int i = 1; i <= 64; i++)
-                n += Yellow((uint)buf[(int)Math.Floor(w * (i - 0.5) / 64)]) ? 1 : 0;
+            {
+                int c = buf[(int)Math.Floor(w * (i - 0.5) / 64)];
+                if ((c & 0xFFFFFF) == 0)
+                    continue;
+                lit++;
+                n += Yellow((uint)c) ? 1 : 0;
+            }
             if (n >= 16 && Now - topLogged > 500)
             {
                 topLogged = Now;
                 var cols = new StringBuilder();
                 for (int i = 1; i <= 8; i++)
                     cols.Append(" " + (buf[(int)Math.Floor(w * (i - 0.5) / 8)] & 0xFFFFFF).ToString("X6"));
-                Log($"위쪽 노란색 {n}/64, 커서 {(cursor ? "보임" : "숨김")}, 색{cols}");
+                Log($"위쪽 노란색 {n}/{lit}, 커서 {(cursor ? "보임" : "숨김")}, 색{cols}");
             }
-            return n >= 32;
+            return lit >= 16 && n * 2 >= lit;
         }
 
         // 같은 내용은 연달아 남기지 않는다 (0.1초마다 같은 오류가 반복되는 경우)
@@ -143,7 +151,7 @@ namespace ZzzWipeout
             On = true; prev = null; okPrev = false; scenes = new List<Scene>(); work = null;
             start = lastYel = Now; ticks = 0; ms = 0; trace.Clear();
             dbg.Clear(); dbgCsv.Clear().Append("판별,시각ms,노랑,채도,차이,찢어짐,줄무늬,지글거림,상태,장면\n");
-            if (ReplayGrab != null)
+            if (Replaying)
                 return;
             if (timer == null)
             {
@@ -164,13 +172,12 @@ namespace ZzzWipeout
         static void TickCore()
         {
             long t0 = Stopwatch.GetTimestamp();
-            int gx = 0, gy = 0, w = ReplayW, h = ReplayH;
-            if (ReplayGrab == null && (!GameClient(out gx, out gy, out w, out h) || w <= 0 || h <= 0))
+            if (!GameView(out int gx, out int gy, out int w, out int h) || w <= 0 || h <= 0)
             {
                 End();
                 return;
             }
-            work = ReplayGrab != null ? ReplayGrab(w, h, work) : GrabFull(gx, gy, w, h, work);
+            work = GrabFull(gx, gy, w, h, work);  // 게임이 그리는 영역만 (화면 비율이 달라 생긴 검은 띠는 빼고)
             Stats s = GetStats(Shrink(work), prev);
             prev = s.L;
             // 노랗고 채도가 높고 직전과 크게 다르지 않은(지지직·번쩍임은 차이 13 이상) 화면은 모두 장면 후보로 묶는다.
@@ -493,6 +500,12 @@ namespace ZzzWipeout
                 f = null;
             }
             f = f ?? new Frame(w, h);
+            if (FakeScreen != null)
+            {
+                FakeCopy(x, y, w, h, f.Bits);
+                f.Src = FakeScreen.Src;
+                return f;
+            }
             IntPtr sdc = GetDC(IntPtr.Zero);
             IntPtr mdc = CreateCompatibleDC(sdc);
             IntPtr old = SelectObject(mdc, f.Hbm);
@@ -507,6 +520,14 @@ namespace ZzzWipeout
         // 화면 일부를 찍어 점의 색을 읽을 수 있는 배열로 돌려준다 (0xAARRGGBB)
         public static int[] GrabLum(int x, int y, int cw, int ch)
         {
+            if (FakeScreen != null)
+            {
+                var o = new int[cw * ch];
+                var h = GCHandle.Alloc(o, GCHandleType.Pinned);
+                try { FakeCopy(x, y, cw, ch, h.AddrOfPinnedObject()); }
+                finally { h.Free(); }
+                return o;
+            }
             IntPtr sdc = GetDC(IntPtr.Zero);
             IntPtr mdc = CreateCompatibleDC(sdc);
             IntPtr dib = NewDib(mdc, cw, ch, out IntPtr bits);
@@ -518,6 +539,104 @@ namespace ZzzWipeout
             SelectObject(mdc, old); DeleteObject(dib); DeleteDC(mdc);
             ReleaseDC(IntPtr.Zero, sdc);
             return buf;
+        }
+
+        // 검사용 그림(FakeScreen)에서 (x, y)부터 w x h를 dst로 옮긴다 (그림 밖은 검정)
+        static unsafe void FakeCopy(int x, int y, int w, int h, IntPtr dst)
+        {
+            Frame s = FakeScreen;
+            int* d = (int*)dst, src = (int*)s.Bits;
+            for (int j = 0; j < h; j++)
+                for (int i = 0; i < w; i++)
+                {
+                    int sx = x + i, sy = y + j;
+                    d[j * w + i] = sx >= 0 && sy >= 0 && sx < s.W && sy < s.H ? src[sy * s.W + sx] : 0;
+                }
+        }
+
+        // 게임이 실제로 그리는 영역(화면 좌표). 모니터 비율이 게임과 다르면(21:9, 32:9, 16:10 등) 게임은 양옆이나 위아래를
+        // 완전한 검정으로 비우고 그 안에 그린다. 그 띠를 빼고 남은 곳을 모든 판별·캡처의 기준으로 쓴다.
+        // 결과 화면처럼 안쪽에도 검은 띠가 있는 화면이 있어서 한 장으로 정하지 않고, 게임 창 크기마다 지금까지 검정이 아닌 것이
+        // 한 번이라도 보인 가장 바깥 범위를 기억한다 (넓어지기만 하고, 전투 화면을 거치며 금방 실제 영역까지 넓어진다).
+        // 화면 비율은 게임 창 크기가 바뀔 때만 달라지므로, 값이 정해지면(10번 연속 그대로이거나 창 전체) 창 크기가 바뀔 때까지 다시 재지 않는다.
+        // 재는 데 화면을 6번 찍어서(2560x1440에서 약 39ms) 정해지기 전에도 1초에 한 번만, 와이프아웃을 찍는 동안에는 재지 않는다
+        // (판별마다 재면 판별 간격이 두 배로 늘어 짧은 장면을 놓쳤다)
+        static int viewW, viewH, vl, vt, vr, vb, viewAt, viewSame;
+        public static bool GameView(out int x, out int y, out int w, out int h)
+        {
+            x = y = w = h = 0;
+            if (!GameClient(out int gx, out int gy, out int cw, out int ch) || cw <= 0 || ch <= 0)
+                return false;
+            bool sample = FakeScreen != null || viewSame < 10 && !On && unchecked(Environment.TickCount - viewAt) >= 1000;
+            if (cw != viewW || ch != viewH)
+            {
+                viewW = cw; viewH = ch;
+                vl = cw; vt = ch; vr = -1; vb = -1;
+                viewSame = 0;
+                sample = true;
+            }
+            if (sample)
+                Measure(gx, gy, cw, ch);
+            if (vr < vl || vb < vt || vr - vl < cw / 4 || vb - vt < ch / 4)  // 아직 모름(검은 화면 등): 창 전체
+            {
+                x = gx; y = gy; w = cw; h = ch;
+                return true;
+            }
+            x = gx + vl; y = gy + vt; w = vr - vl + 1; h = vb - vt + 1;
+            return true;
+        }
+
+        static void Measure(int gx, int gy, int cw, int ch)
+        {
+            viewAt = Environment.TickCount;
+            var before = (vl, vt, vr, vb);
+            Extents(gx, gy, cw, ch);
+            if (vl == 0 && vt == 0 && vr == cw - 1 && vb == ch - 1)
+                viewSame = 10;  // 창 전체: 더 넓어질 수 없다
+            else if (vr >= vl && (vl, vt, vr, vb) == before)
+                viewSame++;
+            else
+                viewSame = 0;
+        }
+
+        static void Extents(int gx, int gy, int cw, int ch)
+        {
+            bool Lit(int c) => (c & 0xFFFFFF) != 0 && Math.Max((c >> 16) & 0xFF, Math.Max((c >> 8) & 0xFF, c & 0xFF)) > 2;
+            foreach (double f in new[] { 0.25, 0.5, 0.75 })
+            {
+                int[] row = GrabLum(gx, gy + R(ch * f), cw, 1);
+                for (int i = 0; i < cw; i++)
+                    if (Lit(row[i])) { vl = Math.Min(vl, i); break; }
+                for (int i = cw - 1; i >= 0; i--)
+                    if (Lit(row[i])) { vr = Math.Max(vr, i); break; }
+                int[] col = GrabLum(gx + R(cw * f), gy, 1, ch);
+                for (int i = 0; i < ch; i++)
+                    if (Lit(col[i])) { vt = Math.Min(vt, i); break; }
+                for (int i = ch - 1; i >= 0; i--)
+                    if (Lit(col[i])) { vb = Math.Max(vb, i); break; }
+            }
+        }
+
+        // 검사(--perftest): 실제 화면에서 판별 한 번에 드는 시간 (게임 영역 재기, 게임 영역 찍기, 줄여서 판별)
+        public static string Perf()
+        {
+            if (!GameClient(out int gx, out int gy, out int cw, out int ch))
+                return "게임 창 없음";
+            double T(Action a)
+            {
+                long t0 = Stopwatch.GetTimestamp();
+                for (int i = 0; i < 20; i++)
+                    a();
+                return (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency / 20;
+            }
+            double m = T(() => Measure(gx, gy, cw, ch));
+            GameView(out int x, out int y, out int w, out int h);
+            Frame f = null;
+            double g = T(() => f = GrabFull(x, y, w, h, f));
+            double s = T(() => GetStats(Shrink(f), null));
+            double v = T(() => GameView(out _, out _, out _, out _));
+            f.Free();
+            return string.Format(IC, "게임 창 {0}x{1}, 게임 영역 {2}x{3} / 영역 재기 {4:F1}ms, 영역 찍기 {5:F1}ms, 줄여서 판별 {6:F1}ms, 판별 중 GameView {7:F2}ms", cw, ch, w, h, m, g, s, v);
         }
 
         // 파일 이름이 .jpg면 품질 95 JPG(2560x1440 기준 PNG의 4분의 1 안팎), 아니면 무손실 PNG로 저장

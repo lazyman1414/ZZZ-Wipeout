@@ -61,48 +61,84 @@ namespace ZzzWipeout
             catch { }
         }
 
-        // Windows 로그인 시 자동 실행(기본 꺼짐): 설정 창에서 켜면 현재 사용자 시작 프로그램(레지스트리 Run)에 등록한다. 관리자 권한은 필요 없다
-        const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run", RUN_NAME = "ZZZ-Wipeout";
-        static string RunCmd => "\"" + System.Windows.Forms.Application.ExecutablePath + "\" --logon";
+        // Windows 로그인 시 자동 실행(기본 꺼짐): 설정 창에서 켜면 작업 스케줄러에 "로그인할 때, 가장 높은 권한으로" 등록한다.
+        // 이 프로그램은 관리자 권한으로 돌아야 해서(app.manifest) 레지스트리 Run으로는 로그인 때 실행되지 않는다
+        const string TASK = "ZZZ-Wipeout", RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        static string Exe => System.Windows.Forms.Application.ExecutablePath;
+        static bool? bootCache;  // 설정 창이 다시 그릴 때마다 schtasks를 부르지 않게
+
+        static string Schtasks(string args, out int code)
+        {
+            code = -1;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("schtasks.exe", args)
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8 };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    string o = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(10000);
+                    code = p.ExitCode;
+                    return o;
+                }
+            }
+            catch { return ""; }
+        }
 
         public static bool BootOn()
         {
-            try
+            if (bootCache == null)
             {
-                using (var k = Registry.CurrentUser.OpenSubKey(RUN_KEY))
-                    return !string.IsNullOrEmpty(k?.GetValue(RUN_NAME) as string);
+                Schtasks("/Query /TN \"" + TASK + "\"", out int code);
+                bootCache = code == 0;
             }
-            catch { return false; }
-        }
-
-        // 자동 실행이 켜져 있는데 기록된 위치가 지금 exe와 다르면 (exe를 옮긴 경우) 지금 위치로 고친다
-        public static void BootFix()
-        {
-            try
-            {
-                using (var k = Registry.CurrentUser.OpenSubKey(RUN_KEY, true))
-                {
-                    string v = k?.GetValue(RUN_NAME) as string;
-                    if (!string.IsNullOrEmpty(v) && !string.Equals(v, RunCmd, StringComparison.OrdinalIgnoreCase))
-                        k.SetValue(RUN_NAME, RunCmd);
-                }
-            }
-            catch { }
+            return bootCache.Value;
         }
 
         public static void BootSet(bool on)
         {
+            bootCache = null;
+            if (!on)
+            {
+                Schtasks("/Delete /TN \"" + TASK + "\" /F", out _);
+                return;
+            }
+            string user = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+            string X(string s) => System.Security.SecurityElement.Escape(s);
+            string xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
+                + "<RegistrationInfo><Description>ZZZ 와이프아웃 캡처 자동 실행</Description></RegistrationInfo>\n"
+                + "<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + X(user) + "</UserId></LogonTrigger></Triggers>\n"
+                + "<Principals><Principal id=\"Author\"><UserId>" + X(user) + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n"
+                + "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+                + "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>\n"
+                + "<Actions Context=\"Author\"><Exec><Command>" + X(Exe) + "</Command><Arguments>--logon</Arguments></Exec></Actions>\n</Task>";
+            string f = Path.Combine(Path.GetTempPath(), "ZZZ-Wipeout-task.xml");
             try
             {
-                using (var k = Registry.CurrentUser.CreateSubKey(RUN_KEY))
-                {
-                    if (on)
-                        k.SetValue(RUN_NAME, RunCmd);
-                    else
-                        k.DeleteValue(RUN_NAME, false);
-                }
+                File.WriteAllText(f, xml, Encoding.Unicode);
+                Schtasks("/Create /TN \"" + TASK + "\" /XML \"" + f + "\" /F", out _);
             }
             catch { }
+            try { File.Delete(f); } catch { }
+        }
+
+        // 시작할 때: 예전 판이 레지스트리 Run에 등록한 자동 실행은 작업 스케줄러로 옮기고,
+        // 자동 실행이 켜져 있는데 기록된 위치가 지금 exe와 다르면 (exe를 옮긴 경우) 지금 위치로 고친다
+        public static void BootFix()
+        {
+            bool old = false;
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(RUN_KEY, true))
+                    if (k?.GetValue(TASK) != null)
+                    {
+                        k.DeleteValue(TASK, false);
+                        old = true;
+                    }
+            }
+            catch { }
+            if (old || (BootOn() && Schtasks("/Query /TN \"" + TASK + "\" /XML", out _).IndexOf("<Command>" + System.Security.SecurityElement.Escape(Exe) + "</Command>", StringComparison.OrdinalIgnoreCase) < 0))
+                BootSet(true);
         }
     }
 }
