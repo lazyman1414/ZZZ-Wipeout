@@ -11,7 +11,7 @@
     <RootNamespace>ZzzWipeout</RootNamespace>
     <ApplicationIcon>ZZZ-Wipeout.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <Product>ZZZ 와이프아웃 캡처</Product>
     <Description>젠레스 존 제로 WIPEOUT 연출 자동 캡처</Description>
     <Copyright>Copyright (c) 2026 lazyman1414</Copyright>

@@ -342,10 +342,19 @@ namespace ZzzWipeout
             btns.Sort((p, q) => p.Left.CompareTo(q.Left));
             Rectangle done = btns[btns.Count - 1];
             var row = btns.Where(o => Math.Abs(o.Top - done.Top) <= 2 && Math.Abs(o.Height - done.Height) <= 2).ToList();
-            if (row.Count < 2 || done.Width < h * 0.267 || done.Width > h * 0.302)
+            if (done.Width < h * 0.267 || done.Width > h * 0.302)
                 return null;
-            int gap = done.Left - row[row.Count - 2].Right - 1;
-            return gap >= h * 0.009 && gap <= h * 0.036 ? row : null;
+            // 4) 그중 완료 버튼에서 왼쪽으로 게임 버튼 간격(0.009~0.036h)으로 이어 붙은 버튼만 (결과 화면에 따라 왼쪽 끝에 "전투 데이터"처럼
+            //    따로 떨어진 버튼이 있다. 함께 묶으면 우리 버튼이 그 왼쪽으로 밀려나 버튼을 가렸다)
+            var group = new List<Rectangle> { done };
+            for (int i = row.Count - 2; i >= 0; i--)
+            {
+                int gap = group[0].Left - row[i].Right - 1;
+                if (gap < h * 0.009 || gap > h * 0.036)
+                    break;
+                group.Insert(0, row[i]);
+            }
+            return group.Count >= 2 ? group : null;
         }
 
         // 결과 화면 아래 줄에서 게임이 그린 것(버튼, "한 번 더" 왼쪽에 붙는 배터리 칸 등) 중 가장 왼쪽 끝(게임 영역 안 x)을 돌려준다.
